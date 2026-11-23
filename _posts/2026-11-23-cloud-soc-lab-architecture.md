@@ -3,6 +3,9 @@ title: "Azure Cloud SOC Lab (Part 1): Architecture & Threat Detection Design"
 date: 2026-11-23 12:00:00 +0200
 categories: [Sentinel Lab, Architecture]
 tags: [microsoft-sentinel, xdr, azure, sc-200, detection-engineering]
+image:
+  path: /assets/img/posts/arch-diagram.png
+  alt: Azure Cloud SOC Lab Architecture Diagram
 ---
 
 ## Overview

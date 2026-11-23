@@ -5,7 +5,7 @@ categories: [SOC Lab, Microsoft Sentinel]
 tags: [azure, microsoft-sentinel, kql, windows-security, telemetry, sc-200]
 image:
   path: /assets/img/posts/cover.png
-  alt: Azure_Cloud_SOC_Lab
+  alt: Azure Cloud SOC Lab
 ---
 
 ## Overview

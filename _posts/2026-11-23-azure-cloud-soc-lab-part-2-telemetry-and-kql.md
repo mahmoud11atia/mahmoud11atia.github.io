@@ -1,7 +1,7 @@
 ---
 title: "Azure Cloud SOC Lab — Part 2: Hardening RDP, AMA Telemetry & KQL Log Validation"
 date: 2026-11-23 21:45:00 +0200
-categories: [SOC Lab, Microsoft Sentinel]
+categories: [Sentinel Lab, Microsoft Sentinel]
 tags: [azure, microsoft-sentinel, kql, windows-security, telemetry, sc-200]
 image:
   path: /assets/img/posts/cover.png

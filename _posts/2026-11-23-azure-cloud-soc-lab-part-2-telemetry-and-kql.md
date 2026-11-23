@@ -1,8 +1,8 @@
 ---
-title: "Azure Cloud SOC Lab — Part 2: Hardening RDP, AMA Telemetry & KQL Log Validation"
+title: "Azure Cloud SOC Lab — Part 2: Hardening RDP, AMA Telemetry & Scheduled Detection Rules"
 date: 2026-11-23 21:45:00 +0200
 categories: [Sentinel Lab, Microsoft Sentinel]
-tags: [azure, microsoft-sentinel, kql, windows-security, telemetry, sc-200]
+tags: [azure, microsoft-sentinel, kql, windows-security, telemetry, mitre-attack, sc-200]
 image:
   path: /assets/img/posts/cover.png
   alt: Azure Cloud SOC Lab
@@ -10,7 +10,7 @@ image:
 
 ## Overview
 
-In this part of the **Azure Cloud SOC Lab**, I set up the core Azure foundation under `RG-sentinel-lab` (`East US`), deployed a Log Analytics workspace (`law-sentinel-lab`) with a daily ingestion cap and Microsoft Sentinel, provisioned the Windows Server 2022 target machine (`vm-win-target`), connected it via a Data Collection Rule (`dcr-win-security-lab`), simulated failed and successful RDP logons from Kali Linux, and validated the incoming telemetry with KQL.
+In this part of the **Azure Cloud SOC Lab**, I set up the core Azure foundation under `RG-sentinel-lab` (`East US`), deployed a Log Analytics workspace (`law-sentinel-lab`) with a daily ingestion cap and Microsoft Sentinel, provisioned the Windows Server 2022 target machine (`vm-win-target`), connected it via a Data Collection Rule (`dcr-win-security-lab`), simulated failed and successful RDP logons from Kali Linux, validated the incoming telemetry with KQL, and built a **Scheduled Analytics Rule** mapped to **MITRE ATT&CK** to detect repeated failed logons and generate incidents for SOC triage.
 
 ## 1. Azure Foundation, Log Analytics & Sentinel
 
@@ -75,6 +75,62 @@ SecurityEvent
 
 ![KQL Aggregation of Repeated Failed Logons](/assets/img/posts/soc-lab-part2/Faild-login-repeated.png){: .normal }
 
+## 6. Scheduled Analytics Rule & MITRE ATT&CK Mapping
+
+With telemetry ingestion and KQL logic validated, I transitioned from manual log hunting to automated detection by creating a **Scheduled query rule** named **`Repeated Failed Windows Logons (Brute Force Signal)`** in Microsoft Sentinel.
+
+### MITRE ATT&CK Alignment
+
+* **Tactic — Credential Access (`TA0006`):** Repeated failed authentication attempts over RDP indicate an adversary attempting to obtain valid account credentials to access `vm-win-target`.
+* **Technique — Brute Force (`T1110`):** Specifically aligns with **Password Guessing (`T1110.001`)** when testing multiple passwords against a targeted user account, or **Password Spraying (`T1110.003`)** when trying common passwords across multiple accounts.
+* **Severity (`Medium`):** Configured as an early high-signal detection (`FailedAttempts >= 3`) that alerts analysts to brute-force activity before or alongside potential follow-on compromise (`EventID 4624`).
+
+### Rule Query & Logic
+
+The scheduled detection rule queries `SecurityEvent` on `vm-win-target` for failed logons (`EventID == 4625`) with valid non-empty source IPs, summarizes attempts per `IpAddress`, and triggers when `FailedAttempts >= 3`:
+
+~~~kusto
+SecurityEvent
+| where Computer has "vm-win-target"
+| where EventID == 4625
+| where isnotempty(IpAddress) and IpAddress != "-"
+| summarize
+    FailedAttempts = count(),
+    AccountsTargeted = make_set(Account, 20),
+    TargetComputers = make_set(Computer, 10),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+  by IpAddress
+| where FailedAttempts >= 3
+| extend AccountName = tostring(AccountsTargeted[0]), HostName = tostring(TargetComputers[0])
+~~~
+
+![Testing the Detection KQL Query in Advanced Hunting](/assets/img/posts/soc-lab-part2/KQL-rule.png){: .normal }
+
+### Scheduling & Rule Activation
+
+To balance timely detection with query efficiency, the rule was configured with the following parameters:
+
+* **Run query every:** `5 Minutes`
+* **Lookup data from the last:** `15 Minutes`
+* **Alert threshold:** `Generate alert when number of query results` → `Is greater than 0`
+* **Event grouping:** `Trigger an alert for each event` (`Suppression`: `Off`)
+* **Incident settings:** Enabled automatic incident creation from generated alerts.
+
+![Enabled Scheduled Analytics Rule in Microsoft Sentinel](/assets/img/posts/soc-lab-part2/rule.png){: .normal }
+
+## 7. Incident Generation & Analyst Triage (`Case ID 19`)
+
+After simulating repeated failed RDP logons from Kali Linux (`156.207.200.227`) against `vm-win-target`, Microsoft Sentinel triggered the rule and generated **Case `ID 19: Repeated Failed Windows Logons (Brute Force Signal)`** with **Medium** severity, **New** status, `1` active alert (`1/1`), and `3` recorded activities.
+
+![Generated Incident ID 19 in Microsoft Sentinel Cases](/assets/img/posts/soc-lab-part2/incident.png){: .normal }
+
+### Triage Takeaways
+
+1. **Timeline & Activity Verification:** Inspecting `Alerts (1)` and `Activities (3)` confirmed the exact burst window (`Nov 24, 2026 12:12:19 AM` to `12:27:19 AM`), targeted account (`m7moud3ttia`), and host (`vm-win-target`).
+2. **Correlation with Successful Logons (`4624`):** During real SOC triage, the immediate next check is querying `EventID == 4624` from the same source IP to verify whether any attempt succeeded.
+3. **Entity Mapping Enhancement:** As shown in the incident view (`No entities` under `Incident graph` and `Assets: 0`), mapping output fields (`IpAddress`, `AccountName`, `HostName`) in the rule's **Entity mapping** section ensures IP, account, and host entities populate directly into the investigation graph.
+
 ## What's Next
 
-With log ingestion and KQL validation confirmed, the next step is building **Scheduled Analytics Rules** in Microsoft Sentinel and investigating the generated incidents.
+With end-to-end telemetry ingestion, **MITRE ATT&CK**-mapped scheduled detection rules, and incident generation working in **Microsoft Sentinel**, the next step in the lab is enriching detections with **Entity Mapping**, building correlation rules for **Brute Force Followed by Successful Logon (`4625` → `4624`)**, and automating response workflows with **Microsoft Sentinel Playbooks (Logic Apps)**.

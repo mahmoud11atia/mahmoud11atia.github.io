@@ -87,7 +87,7 @@ With telemetry ingestion and KQL logic validated, I transitioned from manual log
 
 ### Rule Query & Logic
 
-The scheduled detection rule queries `SecurityEvent` on `vm-win-target` for failed logons (`EventID == 4625`) with valid non-empty source IPs, summarizes attempts per `IpAddress`, and triggers when `FailedAttempts >= 3`:
+To make this rule easy to understand—even if you are new to **Kusto Query Language (KQL)**—think of KQL like an assembly line: data enters from the top table and passes through each pipe (`|`) step-by-step, getting filtered, grouped, and reshaped along the way.
 
 ~~~kusto
 SecurityEvent
@@ -104,6 +104,20 @@ SecurityEvent
 | where FailedAttempts >= 3
 | extend AccountName = tostring(AccountsTargeted[0]), HostName = tostring(TargetComputers[0])
 ~~~
+
+#### Step-by-Step Breakdown for KQL Beginners
+
+1. **`SecurityEvent`** — This is the starting table that holds all Windows Security logs collected from our virtual machine.
+2. **`| where Computer has "vm-win-target"`** — Filters the logs so we only look at events coming from our target lab VM (`vm-win-target`), ignoring any other machines in the workspace.
+3. **`| where EventID == 4625`** — Narrows down the records to Windows Event ID **4625**, which specifically means *"An account failed to log on."*
+4. **`| where isnotempty(IpAddress) and IpAddress != "-"`** — Cleans out local or system background failures that do not have a real network IP address (which Windows often logs as blank or `"-"`).
+5. **`| summarize ... by IpAddress`** — Groups all remaining failed logon rows by each unique attacker `IpAddress` and calculates summary metrics for that IP:
+   * **`FailedAttempts = count()`**: Counts how many total failed login attempts came from that IP.
+   * **`AccountsTargeted = make_set(Account, 20)`**: Creates a unique list (up to 20 items) of all usernames the IP tried to log into.
+   * **`TargetComputers = make_set(Computer, 10)`**: Creates a unique list of targeted machines.
+   * **`FirstAttempt = min(TimeGenerated)`** & **`LastAttempt = max(TimeGenerated)`**: Captures the exact start and end timestamps of the login burst.
+6. **`| where FailedAttempts >= 3`** — Acts as our detection threshold: only IP addresses with **3 or more** failed attempts pass through to trigger an alert, filtering out single accidental typos.
+7. **`| extend AccountName = tostring(AccountsTargeted[0]), HostName = tostring(TargetComputers[0])`** — Creates two clean, single-value text columns (`AccountName` and `HostName`) by grabbing the first item (`[0]`) from the lists we built earlier, making it easy to map them as **Account** and **Host** entities in Microsoft Sentinel.
 
 ![Testing the Detection KQL Query in Advanced Hunting](/assets/img/posts/soc-lab-part2/KQL-rule.png){: .normal }
 

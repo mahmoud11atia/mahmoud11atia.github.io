@@ -151,6 +151,4 @@ Right after the incident was created, the automation rule ran `pb-incident-notif
 3. **Automation Verified End to End:** The chain of correlation rule → incident → automation rule → playbook → email worked without any manual step. The email arrived with the same details an analyst needs to start triage.
 4. **Next Analyst Step:** Because a successful logon followed the failures, a real analyst would now treat the account as potentially compromised, reviewing what that session did and resetting the credentials.
 
-## What's Next
-
-With **MITRE ATT&CK**-mapped detections, **entity mapping**, a **correlation rule** (`4625` → `4624`) and an **automated notification playbook** working in **Microsoft Sentinel**, the next step in the lab is *[your next topic here]*.
+topic here]*.

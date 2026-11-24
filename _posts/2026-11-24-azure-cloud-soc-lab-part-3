@@ -1,0 +1,165 @@
+---
+title: "Azure Cloud SOC Lab — Part 3: Brute-Force-to-Success Correlation, Entity Mapping & SOAR Playbooks"
+date: 2026-11-24 03:00:00 +0200
+categories: [Sentinel Lab, Microsoft Sentinel]
+tags: [microsoft-sentinel, kql, detection-engineering, soar, logic-apps, windows-security]
+---
+
+In **Part 2**, we built the log ingestion pipeline (`law-sentinel-lab`, `vm-win-target`, AMA/DCR) and created our first brute-force detection rule, `Repeated Failed Windows Logons (Brute Force Signal)`, to catch repeated failed Windows sign-ins (`EventID 4625`).
+
+In **Part 3**, we move from single-event alerts to **correlation detection**, **entity mapping**, and **SOAR automation** in Microsoft Sentinel:
+
+1. Build a scheduled correlation rule (`4625` → `4624`) that detects multiple failed logons followed by a successful logon (`LogonType` `10` or `3`) from the same source IP against `vm-win-target`.
+2. Map query output fields to Sentinel entities (`IP`, `Account`, `Host`) so analysts get clear context and attack graphs.
+3. Create a Logic App playbook (`pb-incident-notify`), grant Sentinel permission to run it, attach it with an automation rule, and verify end-to-end alert delivery on **Incident ID 25**.
+
+---
+
+## 1. Building the Brute-Force-to-Success Correlation Rule
+
+A burst of failed logons (`EventID 4625`) shows an attacker guessing passwords. A **successful logon (`EventID 4624`)** from that same IP *after* the failures is a much stronger indicator of compromise.
+
+### Creating the scheduled rule
+
+1. In **Microsoft Sentinel**, go to **Analytics** → **+ Create** → **Scheduled query rule**.
+2. On the **General** tab, name the rule `Brute Force Followed by Successful Logon (4625 -> 4624)`, set **Severity** to **High**, and map the MITRE ATT&CK tactics **Initial Access** and **Credential Access**.
+3. On **Set rule logic**, paste the query below and schedule it to run every **5 minutes**, looking back **15 minutes**.
+
+### KQL correlation query
+
+```kql
+let FailedLogons = SecurityEvent
+| where Computer has "vm-win-target"
+| where EventID == 4625
+| where isnotempty(IpAddress) and IpAddress != "-"
+| summarize FailedAttempts = count(),
+            FirstFailedTime = min(TimeGenerated),
+            LastFailedTime = max(TimeGenerated)
+  by IpAddress
+| where FailedAttempts >= 3;
+let SuccessfulLogons = SecurityEvent
+| where Computer has "vm-win-target"
+| where EventID == 4624
+| where LogonType in (10, 3)
+| where isnotempty(IpAddress) and IpAddress != "-"
+| project SuccessTime = TimeGenerated,
+          IpAddress,
+          CompromisedAccount = Account,
+          TargetHost = Computer,
+          LogonType;
+FailedLogons
+| join kind=inner (SuccessfulLogons) on IpAddress
+| where SuccessTime > LastFailedTime
+| summarize FailedAttempts = max(FailedAttempts),
+            FirstFailedTime = min(FirstFailedTime),
+            LastFailedTime = max(LastFailedTime),
+            SuccessEvents = count(),
+            FirstSuccessTime = min(SuccessTime),
+            LastSuccessTime = max(SuccessTime)
+  by IpAddress, CompromisedAccount, TargetHost
+| extend AccountName = CompromisedAccount, HostName = TargetHost
+```
+
+### How the query works
+
+- **`FailedLogons`**: finds `4625` events on `vm-win-target` with a valid source IP, groups them by `IpAddress`, and keeps only sources with **3 or more** failures.
+- **`SuccessfulLogons`**: finds `4624` events with `LogonType` **10** (Remote Interactive / RDP) or **3** (Network) and projects the account, host, and time.
+- **`join kind=inner ... on IpAddress`**: links failures and successes that share the same source IP.
+- **`where SuccessTime > LastFailedTime`**: enforces order, so the success must come *after* the last failure. This removes false positives from earlier legitimate sessions.
+- **`summarize ... by IpAddress, CompromisedAccount, TargetHost`**: produces one row per IP/account/host with failure counts, success counts, and time windows.
+- **`extend AccountName, HostName`**: creates the field names we use in entity mapping.
+
+### Review and save
+
+The wizard validates the rule and shows the final summary: name, MITRE tactics, **High** severity, **Enabled** status, a 5-minute frequency, and a 15-minute lookback period.
+
+![Review + create page of the new scheduled rule showing validation passed](/assets/img/posts/soc-lab-part3/create-new-rule.png){: w="700" }
+_Review + create: validation passed, High severity, runs every 5 minutes over the last 15 minutes_
+
+---
+
+## 2. Configuring Entity Mapping
+
+Entity mapping tells Sentinel which query fields are IPs, accounts, and hosts, so incidents link them together and the attack graph can be built.
+
+### Mapping entities
+
+1. Still in **Set rule logic**, expand **Alert enhancement** → **Entity mapping**.
+2. Add these mappings:
+
+| Entity  | Identifier | Field         |
+|---------|------------|---------------|
+| IP      | Address    | `IpAddress`   |
+| Account | FullName   | `AccountName` |
+| Host    | HostName   | `HostName`    |
+
+3. Continue through **Incident settings** and **Review + create** to save and enable the rule.
+
+![Entity mapping section in the Analytics rule wizard](/assets/img/posts/soc-lab-part3/entity.png){: w="700" }
+_Entity mapping: IP → IpAddress, Account → AccountName, Host → HostName_
+
+In the **Analytics** table, both scheduled rules are now enabled: `Brute Force Followed by Successful Logon (4625 -> 4624)` (High) and `Repeated Failed Windows Logons (Brute Force Signal)` (Medium).
+
+![Analytics table showing both scheduled rules enabled](/assets/img/posts/soc-lab-part3/new-rule.png){: w="700" }
+_Both detection rules are enabled_
+
+---
+
+## 3. Building the `pb-incident-notify` Playbook
+
+Next, we automate incident notification with an Azure Logic App playbook in resource group `RG-sentinel-lab`.
+
+### Designing the playbook
+
+1. Create a playbook with a **Microsoft Sentinel incident** trigger.
+2. In the Logic App designer, add a **Send an email (V2)** action below the trigger.
+3. Fill the subject and body with dynamic fields: **Incident Title**, **Severity**, **Status**, **Description**, and **Incident URL**, plus the workspace details (`law-sentinel-lab`, `RG-sentinel-lab`).
+4. Save the playbook.
+
+![Logic App designer showing the Sentinel incident trigger followed by Send an email (V2)](/assets/img/posts/soc-lab-part3/simple-playbook.png){: w="700" }
+_pb-incident-notify: Sentinel incident trigger → Send an email (V2)_
+
+> **Troubleshooting:** Pairing the `azuresentinel` connector with the shared Gmail connector triggered a `GmailConnectorPolicyViolation` error during validation. Switching to the **Send an email (V2)** action passed validation cleanly.
+{: .prompt-warning }
+
+### Connecting it with an automation rule
+
+1. Open the analytics rule → **Automated response** → **+ Add new** (or go to **Automation** in Sentinel).
+2. If `pb-incident-notify` shows **No Microsoft Sentinel permissions**, click **Manage playbook permissions** and grant Sentinel permission to run it.
+3. Configure the rule:
+   - **Trigger:** When incident is created
+   - **Condition:** Analytic rule name **Contains** *Current rule*
+   - **Action:** Run playbook → `pb-incident-notify` (Order: 1)
+4. Click **Apply**, then **Review + create** and save.
+
+![Create new automation rule pane with the pb-incident-notify playbook selected](/assets/img/posts/soc-lab-part3/connect-with-playbook.png){: w="700" }
+_Automation rule: when an incident is created, run pb-incident-notify_
+
+---
+
+## 4. Validating with an Attack Simulation (Incident ID 25)
+
+With the VM running, I simulated repeated failed logons followed by a successful logon against `vm-win-target`.
+
+### Investigating Incident ID 25
+
+1. Open **Incidents** in Sentinel and select **ID 25**: `Brute Force Followed by Successful Logon (4625 -> 4624)` (High severity, status New).
+2. Inspect the **Attack graph** and case artifacts. It links the source IP to `vm-win-target` and the compromised account, with 1 active alert, 3 assets, 1 evidence item, and 2 activities.
+
+![Incident 25 attack graph linking the source IP, the target host and the account](/assets/img/posts/soc-lab-part3/bruteforce-incident.png){: w="700" }
+_Incident 25: the attack graph connects the source IP, `vm-win-target`, and the targeted account_
+
+3. Check the inbox. The automation rule triggered `pb-incident-notify`, which delivered an email with the incident title, severity, status, workspace, resource group, and a direct link to the incident in Sentinel.
+
+![Email alert sent by the pb-incident-notify playbook](/assets/img/posts/soc-lab-part3/email-notify.png){: w="700" }
+_The playbook's email alert for Incident 25_
+
+---
+
+## Key Takeaways
+
+- Correlating `4625` → `4624` turns noisy failed-logon alerts into a high-confidence compromise signal.
+- Entity mapping only works if the mapped field names exactly match your query output.
+- Playbooks need explicit Sentinel permissions before an automation rule can run them.
+
+**Next up (Part 4):** *[your next topic here]*

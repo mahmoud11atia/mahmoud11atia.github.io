@@ -1,8 +1,8 @@
 ---
-title: "Azure Cloud SOC Lab — Part 3: Brute-Force-to-Success Correlation, Entity Mapping & SOAR Playbooks"
+title: "Azure Cloud SOC Lab — Part 3: Brute-Force Correlation, Entity Mapping & AI-Powered SOAR Playbooks"
 date: 2026-11-24 03:00:00 +0200
 categories: [Sentinel Lab, Microsoft Sentinel]
-tags: [azure, microsoft-sentinel, kql, windows-security, mitre-attack, sc-200, soar, logic-apps, detection-engineering]
+tags: [azure, microsoft-sentinel, kql, windows-security, mitre-attack, sc-200, soar, logic-apps, detection-engineering, ai-soc]
 image:
   path: /assets/img/posts/soc-lab-part3/cover.png
   alt: Azure Cloud SOC Lab Part 3
@@ -10,7 +10,7 @@ image:
 
 ## Overview
 
-In this part of the **Azure Cloud SOC Lab**, I moved from single-event alerts to **correlation detection** and **automated response** in Microsoft Sentinel. I built a **Scheduled Analytics Rule** (`Brute Force Followed by Successful Logon (4625 -> 4624)`) that detects repeated failed logons followed by a successful logon from the same source IP against `vm-win-target`, mapped its output fields to **Sentinel entities** (IP, Account, Host), created a Logic App playbook (`pb-incident-notify`) that emails the SOC on every new incident, connected it through an **automation rule**, and validated everything end to end with a simulated attack that produced **Incident ID 25**.
+In this part of the **Azure Cloud SOC Lab**, I moved from single-event alerts to **correlation detection** and **automated response** in Microsoft Sentinel. I built a **Scheduled Analytics Rule** (`Brute Force Followed by Successful Logon (4625 -> 4624)`) that detects repeated failed logons followed by a successful logon from the same source IP against `vm-win-target`, mapped its output fields to **Sentinel entities** (IP, Account, Host), and built two Logic App playbooks: `pb-incident-notify` to email the SOC on every new incident, and `enrich-with-MITTRE-via-LLM` to automatically enrich incidents with **Google Gemini** MITRE ATT&CK analysis and remediation guidance.
 
 ## 1. Building the Brute-Force-to-Success Correlation Rule
 
@@ -143,6 +143,63 @@ With the VM running, I repeated the attack simulation from Kali Linux (`156.207.
 Right after the incident was created, the automation rule ran `pb-incident-notify` and the alert email arrived with the incident title, severity, status, workspace, resource group and a direct link to the incident in Sentinel.
 
 ![Email Alert Sent by the pb-incident-notify Playbook](/assets/img/posts/soc-lab-part3/email-notify.png){: .normal }
+
+## 5. AI-Powered Incident Enrichment with Google Gemini (`enrich-with-MITTRE-via-LLM`)
+
+Sending an email alert (`pb-incident-notify`) solves notification, but the analyst still has to manually map the behavior to **MITRE ATT&CK** and document initial triage steps. To accelerate Tier-1/Tier-2 investigation, I built a second SOAR playbook named `enrich-with-MITTRE-via-LLM` inside `RG-sentinel-lab` that sends incident context to **Google Gemini** and posts a structured threat analysis directly into the incident comments.
+
+### Step 1: Designing the Logic App Workflow
+
+1. Created a new Logic App playbook triggered by **Microsoft Sentinel incident**.
+2. Added the **Google Gemini (Independent Publisher)** → **Generate text content** action and authenticated it with a Google AI Studio API key.
+3. Configured the model parameters:
+   - **API Version:** `v1beta`
+   - **Model Name:** `gemini-2.5-flash`
+   - **Contents (`Role - 1`):** `user`
+   - **Prompt (`Parts Items Text - 1`):** Passed dynamic incident fields (**Incident Title**, **Incident Description**, and **Incident Severity**) instructing Gemini to act as a Senior SOC Analyst and return MITRE ATT&CK Tactics/Techniques, mapping justification, and containment steps.
+4. Added **Microsoft Sentinel** → **Add comment to incident (V3)** below the Gemini step, mapping `Incident ARM ID` from the trigger and the generated `text` output from Gemini (which automatically wraps the action inside a `For each` loop to parse the response array).
+
+![Logic App Workflow for MITRE ATT&CK Enrichment](/assets/img/posts/soc-lab-part3/playbook.png){: .normal }
+
+> **Tip:** Avoid legacy model names like `gemini-pro` in the connector configuration, as deprecated endpoints will fail at runtime. Using current models such as `gemini-2.5-flash` with `Role` explicitly set to `user` ensures reliable JSON responses.
+{: .prompt-tip }
+
+### Step 2: Granting Managed Identity Permissions (Fixing `403 Forbidden`)
+
+During the initial test run, the Gemini step succeeded in 11 seconds, but **Add comment to incident (V3)** failed with a `Forbidden` error. Because the playbook authenticates to Sentinel using its **System-assigned Managed Identity**, it needs explicit RBAC permissions to write back to incidents:
+
+1. Opened the playbook's **Identity** blade in Azure and verified **System assigned** status was set to **On**.
+2. Navigated to the resource group `RG-sentinel-lab` → **Access control (IAM)** → **+ Add** → **Add role assignment**.
+3. Selected the **Microsoft Sentinel Responder** role, chose **Managed identity**, and assigned it to `enrich-with-MITTRE-via-LLM`.
+
+![Assigning Microsoft Sentinel Responder Role to the Playbook Managed Identity](/assets/img/posts/soc-lab-part3/give-permission.png){: .normal }
+
+> **Troubleshooting:** If **Add comment to incident (V3)** throws a `403 Forbidden` error even when your user account is an Owner, check the Logic App's **System-assigned Managed Identity** and grant it **Microsoft Sentinel Responder** on the Sentinel resource group.
+{: .prompt-warning }
+
+### Step 3: Validating AI Triage on a Live Incident (`Incident ID 29`)
+
+To validate the enrichment workflow end to end, I ran another brute-force-to-success simulation, generating **Case `ID 29: Brute Force Followed by Successful Logon (4625 -_ 4624)`**. From the incident's **Actions → Run playbook** blade, both `pb-incident-notify` and `enrich-with-MITTRE-via-LLM` were active and ready to execute.
+
+![Running the AI Enrichment Playbook on the Sentinel Incident](/assets/img/posts/soc-lab-part3/total-playbook.png){: .normal }
+
+Within seconds of triggering `enrich-with-MITTRE-via-LLM`, a formatted triage report appeared under **Comments & Attachments** authored by `Playbook-enrich-with-MITTRE-via-LLM`. Gemini accurately identified the `4625 -> 4624` sequence as a confirmed account compromise pattern:
+
+![Automated Gemini Triage Summary Inside Incident ID 29](/assets/img/posts/soc-lab-part3/comment1.png){: .normal }
+
+Scrolling further down the comment shows the granular **MITRE ATT&CK** breakdown—mapping **Credential Access (`T1110` — Brute Force / `T1110.001` — Password Guessing)**, **Initial Access (`T1078` — Valid Accounts)**, and **Persistence (`T1078`)**—followed by justification and actionable containment steps:
+
+![Detailed MITRE ATT&CK Tactics and Sub-Techniques Generated by Gemini](/assets/img/posts/soc-lab-part3/comment2.png){: .normal }
+
+### Final Lab Architecture Summary
+
+By combining correlation rules, entity mapping, and dual SOAR playbooks, the SOC workflow in `law-sentinel-lab` now operates as a complete closed-loop pipeline:
+
+1. **Detection & Correlation:** KQL joins `4625` failures with `4624` successes on the same source IP (`High` severity).
+2. **Context & Graph:** Entity mapping links IP, Account, and Host into a visual attack graph.
+3. **Notification (`pb-incident-notify`):** Immediately alerts the SOC team via email with direct triage links.
+4. **AI Enrichment (`enrich-with-MITTRE-via-LLM`):** Automatically maps the incident to MITRE ATT&CK tactics/techniques and writes remediation guidance straight into the case comments.
+
 
 ### Triage Takeaways
 

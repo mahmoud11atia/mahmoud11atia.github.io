@@ -4,7 +4,7 @@ date: 2026-11-24 03:00:00 +0200
 categories: [Sentinel Lab, Microsoft Sentinel]
 tags: [azure, microsoft-sentinel, kql, windows-security, mitre-attack, sc-200, soar, logic-apps, detection-engineering, ai-soc]
 image:
-  path: /assets/img/posts/soc-lab-part3/cover.png
+  path: /assets/img/posts/soc-lab-part3/cover.jpg
   alt: Azure Cloud SOC Lab Part 3
 ---
 
